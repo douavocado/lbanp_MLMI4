@@ -42,7 +42,8 @@ class LBANPND(LBANP):
         prj_dim=5,
         prj_depth=4,
         diag_depth=4,
-        drop_y=0.5
+        drop_y=0.5,
+        device="cuda",
     ):
         super(LBANPND, self).__init__(
             num_latents,
@@ -56,7 +57,8 @@ class LBANPND(LBANP):
             num_layers,
             drop_y,
             norm_first,
-            bound_std
+            bound_std,
+            device=device,
         )
 
         assert cov_approx in ['cholesky', 'lowrank']
@@ -90,7 +92,7 @@ class LBANPND(LBANP):
             std_tril = torch.bmm(std_prj, std_prj.transpose(1,2))
             std_tril = std_tril.tril()
             if self.bound_std:
-                diag_ids = torch.arange(num_target*dim_y, device='cuda')
+                diag_ids = torch.arange(num_target*dim_y, device=self.device)
                 std_tril[:, diag_ids, diag_ids] = 0.05 + 0.95*torch.tanh(std_tril[:, diag_ids, diag_ids])
             pred_tar = torch.distributions.multivariate_normal.MultivariateNormal(mean, scale_tril=std_tril)
         else:
@@ -133,7 +135,7 @@ class LBANPND(LBANP):
         batch.xc = xc
         batch.yc = yc
         batch.xt = xt
-        batch.yt = torch.zeros((xt.shape[0], xt.shape[1], yc.shape[2]), device='cuda')
+        batch.yt = torch.zeros((xt.shape[0], xt.shape[1], yc.shape[2]), device=self.device)
 
         out_encoder = self.get_predict_encoding(batch)
         pred_tar = self.decode(out_encoder, batch_size, dim_y, num_target)

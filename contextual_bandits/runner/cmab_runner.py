@@ -76,6 +76,7 @@ def cmab(args):
                     print(f"Overriding argument {key}: {config[key]}")
 
             model = model_cls(**config).to(device)
+            model.device = torch.device(device)
             model.eval()
             file = osp.join(path, filename)
             if not osp.exists(file):

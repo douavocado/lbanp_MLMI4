@@ -36,10 +36,11 @@ class LBANP(nn.Module):
         num_layers,
         drop_y=0.5,
         norm_first=True,
-        bound_std = False
+        bound_std = False,
+        device="cuda",
     ):
         super(LBANP, self).__init__()
-
+        self.device = device
         self.drop_y = drop_y
 
 

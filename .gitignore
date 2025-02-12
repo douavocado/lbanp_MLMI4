@@ -125,5 +125,10 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+# results and weights
+*/results/**
+**/evalsets/**
+**/datasets/**
+
 # Pyre type checker
 .pyre/

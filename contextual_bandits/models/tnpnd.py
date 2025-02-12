@@ -46,7 +46,8 @@ class TNPND(TNP):
         cov_approx='cholesky',
         prj_dim=5,
         prj_depth=4,
-        diag_depth=4
+        diag_depth=4,
+        device="cuda",
     ):
         super(TNPND, self).__init__(
             dim_x,
@@ -57,7 +58,8 @@ class TNPND(TNP):
             nhead,
             dropout,
             num_layers,
-            drop_y
+            drop_y,
+            device=device,
         )
 
         assert cov_approx in ['cholesky', 'lowrank']
@@ -68,7 +70,7 @@ class TNPND(TNP):
             nn.ReLU(),
             nn.Linear(dim_feedforward, dim_y)
         )
-
+        self.emnist=False
         std_encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, batch_first=True)
         self.std_encoder = nn.TransformerEncoder(std_encoder_layer, num_std_layers)
 
@@ -87,7 +89,7 @@ class TNPND(TNP):
             std_tril = torch.bmm(std_prj, std_prj.transpose(1,2))
             std_tril = std_tril.tril()
             if self.emnist:
-                diag_ids = torch.arange(num_target*dim_y, device='cuda')
+                diag_ids = torch.arange(num_target*dim_y, device=self.device)
                 std_tril[:, diag_ids, diag_ids] = 0.05 + 0.95*torch.tanh(std_tril[:, diag_ids, diag_ids])
             pred_tar = torch.distributions.multivariate_normal.MultivariateNormal(mean_target, scale_tril=std_tril)
         else:
