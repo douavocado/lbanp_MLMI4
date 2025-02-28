@@ -105,6 +105,7 @@ class LBANP(nn.Module):
         return encoding
 
     def predict(self, xc, yc, xt, num_samples=None, drop_ctx=False):
+        # assumes xc, yc, xt are all of shape (batch_size, num_samples,num_features)
         batch = AttrDict()
         batch.xc = xc
         batch.yc = yc
@@ -120,8 +121,10 @@ class LBANP(nn.Module):
             std = 0.05 + 0.95 * F.softplus(std)
         else:
             std = torch.exp(std)
-
-        return Normal(mean, std)
+        if num_samples is not None:
+            return Normal(mean, std).sample(torch.Size([num_samples]))
+        else:
+            return Normal(mean, std)
 
     def forward(self, batch, num_samples=None, reduce_ll=True):
 
@@ -134,4 +137,4 @@ class LBANP(nn.Module):
             outs.tar_ll = pred_tar.log_prob(batch.yt).sum(-1)
         outs.loss = - (outs.tar_ll)
 
-        return outs
+        return outs, pred_tar
