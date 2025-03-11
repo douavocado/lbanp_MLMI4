@@ -28,3 +28,4 @@ pretrain: false
 print_freq: 200
 resume: null
 save_freq: 1000
+use_ar: true

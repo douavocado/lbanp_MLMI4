@@ -90,7 +90,7 @@ def cmab(args):
             if args.model == "uniform":
                 actor = UNIFORM()
             else:
-                actor = DummyActor(model, device=args.device, method=args.cmab_eval_method)
+                actor = DummyActor(model, device=args.device, method=args.cmab_eval_method, use_ar=args.use_ar)
             path, filename = get_eval_path(args)
             with open(osp.join(path, 'args.yaml'), 'w') as f:
                 yaml.dump(args.__dict__, f)
@@ -102,7 +102,7 @@ def cmab(args):
             if args.model == "uniform":
                 actor = UNIFORM()
             else:
-                actor = DummyActor(model, device=args.device, method=args.cmab_eval_method)
+                actor = DummyActor(model, device=args.device, method=args.cmab_eval_method, use_ar=args.use_ar)
             path, filename = get_eval_path(args)
             with open(osp.join(path, 'args.yaml'), 'w') as f:
                 yaml.dump(args.__dict__, f)
@@ -562,7 +562,7 @@ class ContextualBandit(object):
 
 
 class DummyActor():
-    def __init__(self, model, num_actions=5, device=None, method="mean"):
+    def __init__(self, model, num_actions=5, device=None, method="mean", use_ar=False):
         self.model = model
         self.name = model._get_name()
         self.Na = num_actions
@@ -570,6 +570,7 @@ class DummyActor():
         self.hr = None
         self.device = device
         self.method = method
+        self.use_ar = use_ar
 
     def action(self, context, num_bs=10):  # context [Dx=2]
         if self.hc is None:
@@ -595,8 +596,10 @@ class DummyActor():
         xc = torch.from_numpy(self.hc).to(self.device).type(torch.float32).unsqueeze(0)  # [B=1,H,Dx=2]
         yc = torch.from_numpy(self.hr).to(self.device).type(torch.float32).unsqueeze(0)  # [B=1,H,Dy=5]
         xt = torch.from_numpy(context).to(self.device).type(torch.float32).reshape(1, 1, 2)  # [B=1,Nt=1,Dx=2]
-
-        py = self.model.predict(xc, yc, xt)
+        if self.use_ar:
+            py = self.model.ar_predict(xc, yc, xt)
+        else:
+            py = self.model.predict(xc, yc, xt)
         mu, sigma = py.loc, py.scale  # [B=1,Nt=1,Dy=5]
         return mu, sigma
 

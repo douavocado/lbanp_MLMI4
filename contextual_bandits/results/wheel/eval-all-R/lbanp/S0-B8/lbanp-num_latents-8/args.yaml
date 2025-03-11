@@ -1,7 +1,7 @@
 cmab_data: wheel
 cmab_eval_method: ucb
 cmab_eval_num_contexts: 2000
-cmab_eval_seed: 49
+cmab_eval_seed: 12
 cmab_eval_seed_end: 49
 cmab_eval_seed_start: 0
 cmab_mode: eval
@@ -14,7 +14,7 @@ cmab_train_num_batches: 1
 cmab_train_reward: all
 cmab_train_seed: 0
 cmab_train_update_freq: 1
-cmab_wheel_delta: 0.9
+cmab_wheel_delta: 0.95
 device: cpu
 eval_freq: 5000
 expconfig: lbanp-num_latents-8
@@ -28,3 +28,4 @@ pretrain: false
 print_freq: 200
 resume: null
 save_freq: 1000
+use_ar: false

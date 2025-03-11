@@ -49,6 +49,8 @@ def get_args():
     parser.add_argument('--eval_freq', type=int, default=5000)
     parser.add_argument('--save_freq', type=int, default=1000)
 
+    # eval
+    parser.add_argument('--use_ar', action='store_true', default=False)
     args = parser.parse_args()
 
     return args
