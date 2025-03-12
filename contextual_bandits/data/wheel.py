@@ -56,10 +56,13 @@ class WheelBanditSampler():
     def __init__(self):
         pass
 
-    def sample(self, batch_size=8, num_contexts=512, num_targets=50, device=None, seed=0, reward="optimal"):
+    def sample(self, batch_size=8, num_contexts=512, num_targets=50, device=None, seed=0, reward="optimal", delta=None):
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
-        deltas = torch.rand(batch_size)
+        if delta is None:
+          deltas = torch.rand(batch_size)
+        else:
+          deltas = torch.ones(batch_size) * delta
 
         Nc = num_contexts
         Nt = num_targets

@@ -597,7 +597,7 @@ class DummyActor():
         yc = torch.from_numpy(self.hr).to(self.device).type(torch.float32).unsqueeze(0)  # [B=1,H,Dy=5]
         xt = torch.from_numpy(context).to(self.device).type(torch.float32).reshape(1, 1, 2)  # [B=1,Nt=1,Dx=2]
         if self.use_ar:
-            py = self.model.ar_predict(xc, yc, xt)
+            py = self.model.ar_predict(xc, yc, xt, num_samples=10)
         else:
             py = self.model.predict(xc, yc, xt)
         mu, sigma = py.loc, py.scale  # [B=1,Nt=1,Dy=5]

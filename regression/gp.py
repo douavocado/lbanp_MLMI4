@@ -25,7 +25,8 @@ from utils.log import get_logger, RunningAverage
 
 def main():
     parser = argparse.ArgumentParser()
-
+    # device
+    parser.add_argument('--device', type=str, default="cuda")
     # Experiment
     parser.add_argument('--mode', default='train')
     parser.add_argument('--expid', type=str, default='default')
@@ -94,7 +95,8 @@ def main():
         config['pretrain'] = args.pretrain
 
     model = model_cls(**config)
-    model.cuda()
+    device = torch.device(args.device)
+    model.to(device)
 
     if args.mode == 'train':
         train(args, model)
@@ -102,6 +104,7 @@ def main():
         eval(args, model)
 
 def train(args, model):
+    device = torch.device(args.device)
     if osp.exists(args.root + '/ckpt.tar'):
         if args.resume is None:
             raise FileExistsError(args.root)
@@ -114,7 +117,7 @@ def train(args, model):
     path, filename = get_eval_path(args)
     if not osp.isfile(osp.join(path, filename)):
         print('generating evaluation sets...')
-        gen_evalset(args)
+        gen_evalset(args, device)
 
     torch.manual_seed(args.train_seed)
     torch.cuda.manual_seed(args.train_seed)
@@ -149,7 +152,7 @@ def train(args, model):
         batch = sampler.sample(
             batch_size=args.train_batch_size,
             max_num_points=args.max_num_points,
-            device='cuda')
+            device=device)
         
         if args.model in ["np", "anp", "cnp", "canp", "bnp", "banp"]:
             outs = model(batch, num_samples=args.train_num_samples)
@@ -196,7 +199,7 @@ def get_eval_path(args):
     filename += '.tar'
     return path, filename
 
-def gen_evalset(args):
+def gen_evalset(args, device):
     if args.eval_kernel == 'rbf':
         kernel = RBFKernel()
     elif args.eval_kernel == 'matern':
@@ -213,7 +216,7 @@ def gen_evalset(args):
         batches.append(sampler.sample(
             batch_size=args.eval_batch_size,
             max_num_points=args.max_num_points,
-            device='cuda'))
+            device=device))
 
     torch.manual_seed(time.time())
     torch.cuda.manual_seed(time.time())
@@ -224,6 +227,7 @@ def gen_evalset(args):
     torch.save(batches, osp.join(path, filename))
 
 def eval(args, model):
+    device = torch.device(args.device)
     # eval a trained model on log-likelihood
     if args.mode == 'eval':
         ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location='cuda')
@@ -243,7 +247,7 @@ def eval(args, model):
     path, filename = get_eval_path(args)
     if not osp.isfile(osp.join(path, filename)):
         print('generating evaluation sets...')
-        gen_evalset(args)
+        gen_evalset(args, device)
     eval_batches = torch.load(osp.join(path, filename))
 
     if args.mode == "eval":
@@ -255,7 +259,7 @@ def eval(args, model):
     with torch.no_grad():
         for batch in tqdm(eval_batches, ascii=True):
             for key, val in batch.items():
-                batch[key] = val.cuda()
+                batch[key] = val.to(device)
             if args.model in ["np", "anp", "bnp", "banp"]:
                 outs = model(batch, args.eval_num_samples)
             else:
