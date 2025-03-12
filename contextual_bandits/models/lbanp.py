@@ -21,7 +21,7 @@ from attrdict import AttrDict
 from torch.distributions.normal import Normal
 
 from models.lbanp_modules import LBANPEncoderLayer, LBANPEncoder, NPDecoderLayer, NPDecoder
-from inference.ar import ar_predict
+from inference.ar import ar_predict, ar_predict_batched, ar_predict_steps
 
 class LBANP(nn.Module):
     def __init__(
@@ -114,7 +114,6 @@ class LBANP(nn.Module):
 
     def ar_predict_batched(self, xc, yc, xt, num_samples=50, batch_size=16):
         generator = torch.Generator().manual_seed(0)
-        from inference.ar import ar_predict_batched
         mean, var, yt, ft = ar_predict_batched(
             generator, self, [xc], [yc], [xt], 
             num_samples=num_samples, 
@@ -161,7 +160,6 @@ class LBANP(nn.Module):
 
     def ar_predict_steps(self, xc, yc, xt, num_samples=50, num_steps=4):
         generator = torch.Generator().manual_seed(0)
-        from inference.ar import ar_predict_steps
         mean, var, yt, ft = ar_predict_steps(
             generator, self, [xc], [yc], [xt], 
             num_samples=num_samples, 

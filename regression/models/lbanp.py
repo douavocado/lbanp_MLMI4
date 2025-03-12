@@ -21,7 +21,7 @@ from attrdict import AttrDict
 from torch.distributions.normal import Normal
 
 from models.lbanp_modules import LBANPEncoderLayer, LBANPEncoder, NPDecoderLayer, NPDecoder
-
+from inference.ar import ar_predict, ar_predict_batched, ar_predict_steps
 class LBANP(nn.Module):
     """
         Latent Bottlenecked Attentive Neural Process (LBANPs)
@@ -92,6 +92,35 @@ class LBANP(nn.Module):
         if self.norm_first:
             encoding = self.norm(encoding)
         return encoding
+
+    def ar_predict(self, xc, yc, xt, num_samples=50):
+        generator = torch.Generator().manual_seed(0)
+        mean, var, yt, ft = ar_predict(generator, self, [xc], [yc], [xt], num_samples=num_samples)
+        # Ensure variance values are positive
+        var_positive = torch.clamp(var[0], min=1e-12)  # Clamp to ensure positive values
+        return Normal(mean[0], torch.sqrt(var_positive))  # Use sqrt of variance for standard deviation
+
+    def ar_predict_batched(self, xc, yc, xt, num_samples=50, batch_size=16):
+        generator = torch.Generator().manual_seed(0)
+        mean, var, yt, ft = ar_predict_batched(
+            generator, self, [xc], [yc], [xt], 
+            num_samples=num_samples, 
+            batch_size=batch_size
+        )
+        # Ensure variance values are positive
+        var_positive = torch.clamp(var[0], min=1e-12)  # Clamp to ensure positive values
+        return Normal(mean[0], torch.sqrt(var_positive))  # Use sqrt of variance for standard deviation
+    
+    def ar_predict_steps(self, xc, yc, xt, num_samples=50, num_steps=4):
+        generator = torch.Generator().manual_seed(0)
+        mean, var, yt, ft = ar_predict_steps(
+            generator, self, [xc], [yc], [xt], 
+            num_samples=num_samples, 
+            num_steps=num_steps
+        )
+        # Ensure variance values are positive
+        var_positive = torch.clamp(var[0], min=1e-12)  # Clamp to ensure positive values
+        return Normal(mean[0], torch.sqrt(var_positive))  # Use sqrt of variance for standard deviation
 
     def predict(self, xc, yc, xt, context_encodings=None, num_samples=None):
         batch = AttrDict()
