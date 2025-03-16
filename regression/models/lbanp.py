@@ -21,7 +21,8 @@ from attrdict import AttrDict
 from torch.distributions.normal import Normal
 
 from models.lbanp_modules import LBANPEncoderLayer, LBANPEncoder, NPDecoderLayer, NPDecoder
-from inference.ar import ar_predict, ar_predict_batched, ar_predict_steps
+from inference.ar_custom import ar_log_likelihood, no_cheat_ar_log_likelihood
+
 class LBANP(nn.Module):
     """
         Latent Bottlenecked Attentive Neural Process (LBANPs)
@@ -93,36 +94,8 @@ class LBANP(nn.Module):
             encoding = self.norm(encoding)
         return encoding
 
-    def ar_predict(self, xc, yc, xt, num_samples=50):
-        generator = torch.Generator().manual_seed(0)
-        mean, var, yt, ft = ar_predict(generator, self, [xc], [yc], [xt], num_samples=num_samples)
-        # Ensure variance values are positive
-        var_positive = torch.clamp(var[0], min=1e-12)  # Clamp to ensure positive values
-        return Normal(mean[0], torch.sqrt(var_positive))  # Use sqrt of variance for standard deviation
-
-    def ar_predict_batched(self, xc, yc, xt, num_samples=50, batch_size=16):
-        generator = torch.Generator().manual_seed(0)
-        mean, var, yt, ft = ar_predict_batched(
-            generator, self, [xc], [yc], [xt], 
-            num_samples=num_samples, 
-            batch_size=batch_size
-        )
-        # Ensure variance values are positive
-        var_positive = torch.clamp(var[0], min=1e-12)  # Clamp to ensure positive values
-        return Normal(mean[0], torch.sqrt(var_positive))  # Use sqrt of variance for standard deviation
-    
-    def ar_predict_steps(self, xc, yc, xt, num_samples=50, num_steps=4):
-        generator = torch.Generator().manual_seed(0)
-        mean, var, yt, ft = ar_predict_steps(
-            generator, self, [xc], [yc], [xt], 
-            num_samples=num_samples, 
-            num_steps=num_steps
-        )
-        # Ensure variance values are positive
-        var_positive = torch.clamp(var[0], min=1e-12)  # Clamp to ensure positive values
-        return Normal(mean[0], torch.sqrt(var_positive))  # Use sqrt of variance for standard deviation
-
     def predict(self, xc, yc, xt, context_encodings=None, num_samples=None):
+        # expects xc, yc, xt to be of shape (batch_size, num_points, dim_x or dim_y)
         batch = AttrDict()
         batch.xc = xc
         batch.yc = yc
@@ -141,15 +114,22 @@ class LBANP(nn.Module):
         return Normal(mean, std)
 
 
-    def forward(self, batch, num_samples=None, reduce_ll=True):
-
-        pred_tar = self.predict(batch.xc, batch.yc, batch.xt)
-
+    def forward(self, batch, num_samples=None, reduce_ll=True, use_ar=False):
         outs = AttrDict()
-        if reduce_ll:
-            outs.tar_ll = pred_tar.log_prob(batch.yt).sum(-1).mean()
-        else:
-            outs.tar_ll = pred_tar.log_prob(batch.yt).sum(-1)
-        outs.loss = - (outs.tar_ll)
+        if use_ar:
+            ll = no_cheat_ar_log_likelihood(self, batch.xc, batch.yc, batch.xt, batch.yt, num_samples=100, seed=None, smooth=False, covariance_est="bayesian", batch_size_targets=5, nu_p=100)
+            if reduce_ll:
+                outs.tar_ll = ll.mean()
+            else:
+                outs.tar_ll = ll
+            outs.loss = - (outs.tar_ll)
+        else:   
+            pred_tar = self.predict(batch.xc, batch.yc, batch.xt)
+
+            if reduce_ll:
+                outs.tar_ll = pred_tar.log_prob(batch.yt).sum(-1).mean()
+            else:
+                outs.tar_ll = pred_tar.log_prob(batch.yt).sum(-1)
+            outs.loss = - (outs.tar_ll)
 
         return outs

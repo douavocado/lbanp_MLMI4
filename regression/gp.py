@@ -74,6 +74,9 @@ def main():
     parser.add_argument('--eval_kernel', type=str, default='rbf')
     parser.add_argument('--t_noise', type=float, default=None)
 
+    # AR settings
+    parser.add_argument('--use_ar', action='store_true')
+
     args = parser.parse_args()
 
     if args.expid is not None:
@@ -120,7 +123,8 @@ def train(args, model):
         gen_evalset(args, device)
 
     torch.manual_seed(args.train_seed)
-    torch.cuda.manual_seed(args.train_seed)
+    if args.device == "cuda":
+        torch.cuda.manual_seed(args.train_seed)
 
     sampler = GPSampler(RBFKernel())
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
@@ -219,7 +223,8 @@ def gen_evalset(args, device):
             device=device))
 
     torch.manual_seed(time.time())
-    torch.cuda.manual_seed(time.time())
+    if args.device == "cuda":   
+        torch.cuda.manual_seed(time.time())
 
     path, filename = get_eval_path(args)
     if not osp.isdir(path):
@@ -230,7 +235,7 @@ def eval(args, model):
     device = torch.device(args.device)
     # eval a trained model on log-likelihood
     if args.mode == 'eval':
-        ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location='cuda')
+        ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location=args.device)
         model.load_state_dict(ckpt.model)
         if args.eval_logfile is None:
             eval_logfile = f'eval_{args.eval_kernel}'
@@ -252,7 +257,8 @@ def eval(args, model):
 
     if args.mode == "eval":
         torch.manual_seed(args.eval_seed)
-        torch.cuda.manual_seed(args.eval_seed)
+        if args.device == "cuda":
+            torch.cuda.manual_seed(args.eval_seed)
 
     ravg = RunningAverage()
     model.eval()
@@ -263,13 +269,14 @@ def eval(args, model):
             if args.model in ["np", "anp", "bnp", "banp"]:
                 outs = model(batch, args.eval_num_samples)
             else:
-                outs = model(batch)
+                outs = model(batch, use_ar=args.use_ar)
 
             for key, val in outs.items():
                 ravg.update(key, val)
 
     torch.manual_seed(time.time())
-    torch.cuda.manual_seed(time.time())
+    if args.device == "cuda":   
+        torch.cuda.manual_seed(time.time())
 
     line = f'{args.model}:{args.expid} {args.eval_kernel} '
     if args.t_noise is not None:
