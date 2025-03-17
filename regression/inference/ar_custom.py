@@ -1,6 +1,7 @@
 import torch
 from torch.distributions import Normal
 from einops import rearrange, repeat
+from data.gp import RBFKernelNonRandom
 
 def ar_sample(model, xc, yc, xt, num_samples=1, seed=None, smoothed=False, batch_size_targets=1):
     """
@@ -144,7 +145,9 @@ def no_cheat_ar_log_likelihood(model, xc, yc, xt, yt, num_samples=20, seed=None,
         num_samples: Number of samples to take for the AR sampling
         seed: Random seed for reproducibility
         smooth: Whether to use smooth or non smooth samples for covariance matrix estimation/likelihood calculation.
-        convariance_est: The method for estimating covariance matrix from samples. One of [scm, shrinkage, bayesian]
+        covariance_est: The method for estimating covariance matrix from samples. One of [scm, shrinkage, bayesian]
+        nu_p: The degrees of freedom for the inverse wishart prior for bayesian covariance estimation
+        batch_size_targets: Number of target points to process at once in each autoregressive step
         
     Returns:
         log_likelihood: Log likelihood of the target points given the context
@@ -166,67 +169,42 @@ def no_cheat_ar_log_likelihood(model, xc, yc, xt, yt, num_samples=20, seed=None,
     # for scm, we use empirical mean
     mean_y = torch.mean(use_y, dim=0)  # shape (b, n, d)
     batch_size, num_targets, dim_y = mean_y.shape
-    # Initialize covariance matrix        
-    covariance_m = torch.zeros((batch_size, num_targets, num_targets, dim_y, dim_y), device=use_y.device)
 
     if covariance_est == "scm":
         # just take sample covariance matrix (the unbiased version)
-        # sample covariance here is actually a tensor (of 4 dimension). Averages should be taken across the s dimension and covariance_m is of shape (b, n, n, d, d), so covariance is computed across all target points for all pairs of dimensions in the datapoint
+        # uses torch.cov to compute sample covariance matrix for every batch and every data dimension
         
-        
-        
-        # Center the data
-        centered_y = use_y - mean_y.unsqueeze(0)  # shape (s, b, n, d)
-        
-        # Initialize covariance matrix
-        
-        covariance_m = torch.zeros((batch_size, num_targets, num_targets, dim_y, dim_y), device=use_y.device)
-        
-        # Compute covariance matrix
-        for b in range(batch_size):
-            for i in range(num_targets):
-                for j in range(num_targets):
-                    # For each pair of target points, compute covariance across all dimensions
-                    # Using outer product of centered data points
-                    cov_sum = torch.zeros((dim_y, dim_y), device=use_y.device)
-                    for s in range(num_samples):
-                        y_i = centered_y[s, b, i, :].unsqueeze(1)  # shape (d, 1)
-                        y_j = centered_y[s, b, j, :].unsqueeze(0)  # shape (1, d)
-                        cov_sum += torch.matmul(y_i, y_j)  # outer product, shape (d, d)
-                    
-                    # Unbiased estimator: divide by (n-1)
-                    covariance_m[b, i, j] = cov_sum / (num_samples - 1)
-        
-        # now using this covariance_m estimate, as well as mean estimate, calculate the log likelihood of the ground truth labels yt under this distribution
         log_likelihood = torch.zeros(batch_size, device=use_y.device)
         
         for b in range(batch_size):
-            # Create multivariate normal distribution for each batch
-            # Reshape mean and covariance for multivariate normal
-            mean_vector = mean_y[b].reshape(-1)  # Flatten to (n*d)
+            # Reshape data for this batch to (num_samples, num_targets*dim_y)
+            # First, extract data for this batch
+            batch_data = use_y[:, b]  # shape (num_samples, num_targets, dim_y)
             
-            # Build block covariance matrix for the entire target set
-            cov_matrix_size = num_targets * dim_y
-            cov_matrix = torch.zeros((cov_matrix_size, cov_matrix_size), device=use_y.device)
+            # Reshape to (num_samples, num_targets*dim_y)
+            batch_data_flat = batch_data.reshape(num_samples, -1)
             
-            # Fill the covariance matrix with blocks
-            for i in range(num_targets):
-                for j in range(num_targets):
-                    cov_matrix[i*dim_y:(i+1)*dim_y, j*dim_y:(j+1)*dim_y] = covariance_m[b, i, j]
+            # Compute sample covariance matrix using torch.cov
+            # torch.cov expects input of shape (features, observations)
+            # so we transpose batch_data_flat
+            cov_matrix = torch.cov(batch_data_flat.T)  # shape (num_targets*dim_y, num_targets*dim_y)
+            
+            # Get mean for this batch
+            mean_vector = mean_y[b].reshape(-1)  # Flatten to (num_targets*dim_y)
             
             # Ensure covariance matrix is symmetric and positive definite
             cov_matrix = 0.5 * (cov_matrix + cov_matrix.T)
+            
             # Add small diagonal term for numerical stability
-            cov_matrix = cov_matrix + 1e-6 * torch.eye(cov_matrix_size, device=use_y.device)
-
-            num_targets = xt.shape[1]            
-            try:                
+            cov_matrix = cov_matrix + 1e-12 * torch.eye(cov_matrix.shape[0], device=use_y.device)
+            
+            try:
                 # Create multivariate normal distribution
                 mvn_dist = torch.distributions.MultivariateNormal(mean_vector, cov_matrix)
                 
                 # Calculate log probability of ground truth
-                yt_flat = yt[b].reshape(-1)  # Flatten to (n*d)
-                log_likelihood[b] = mvn_dist.log_prob(yt_flat) / num_targets # normalize by number of targets
+                yt_flat = yt[b].reshape(-1)  # Flatten to (num_targets*dim_y)
+                log_likelihood[b] = mvn_dist.log_prob(yt_flat) / num_targets  # normalize by number of targets
             except:
                 # Handle numerical issues
                 print("Warning: Covariance matrix is not positive definite. Using fallback method of only taking diagonal entries")
@@ -237,7 +215,7 @@ def no_cheat_ar_log_likelihood(model, xc, yc, xt, yt, num_samples=20, seed=None,
                     torch.diag(torch.clamp(diag_cov, min=1e-6))
                 )
                 yt_flat = yt[b].reshape(-1)
-                log_likelihood[b] = mvn_dist.log_prob(yt_flat) / num_targets # normalize by number of targets
+                log_likelihood[b] = mvn_dist.log_prob(yt_flat) / num_targets  # normalize by number of targets
         
         return log_likelihood
 
@@ -257,17 +235,18 @@ def no_cheat_ar_log_likelihood(model, xc, yc, xt, yt, num_samples=20, seed=None,
         log_likelihood = torch.zeros(batch_size, device=use_y.device)
         
         for b in range(batch_size):
+            # Reshape data for this batch to (num_samples, num_targets*dim_y)
+            batch_data = use_y[:, b]  # shape (num_samples, num_targets, dim_y)
+            
+            # Reshape to (num_samples, num_targets*dim_y)
+            batch_data_flat = batch_data.reshape(num_samples, -1)
+            
+            # Compute sample covariance matrix using torch.cov
+            # torch.cov expects input of shape (features, observations)
+            sample_cov = torch.cov(batch_data_flat.T)  # shape (num_targets*dim_y, num_targets*dim_y)
+            
             # Create diagonal scale matrix from model's predicted variances
             psi = torch.diag_embed(var_y[b].reshape(-1))  # Diagonal matrix of variances
-            
-            # Combine sample covariance with prior
-            cov_matrix_size = num_targets * dim_y
-            sample_cov = torch.zeros((cov_matrix_size, cov_matrix_size), device=use_y.device)
-            
-            # Fill the sample covariance matrix with blocks
-            for i in range(num_targets):
-                for j in range(num_targets):
-                    sample_cov[i*dim_y:(i+1)*dim_y, j*dim_y:(j+1)*dim_y] = covariance_m[b, i, j]
             
             # Bayesian estimate: weighted combination of sample covariance and prior
             alpha = (num_samples - 1) / (num_samples - 1 + nu)
@@ -275,7 +254,7 @@ def no_cheat_ar_log_likelihood(model, xc, yc, xt, yt, num_samples=20, seed=None,
             
             # Ensure symmetry and positive definiteness
             bayesian_cov = 0.5 * (bayesian_cov + bayesian_cov.T)
-            bayesian_cov = bayesian_cov + 1e-6 * torch.eye(cov_matrix_size, device=use_y.device)
+            bayesian_cov = bayesian_cov + 1e-12 * torch.eye(bayesian_cov.shape[0], device=use_y.device)
             
             try:
                 # Create multivariate normal distribution with Bayesian covariance

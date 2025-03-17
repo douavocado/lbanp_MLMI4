@@ -117,7 +117,7 @@ class LBANP(nn.Module):
     def forward(self, batch, num_samples=None, reduce_ll=True, use_ar=False):
         outs = AttrDict()
         if use_ar:
-            ll = no_cheat_ar_log_likelihood(self, batch.xc, batch.yc, batch.xt, batch.yt, num_samples=100, seed=None, smooth=False, covariance_est="bayesian", batch_size_targets=5, nu_p=100)
+            ll = no_cheat_ar_log_likelihood(self, batch.xc, batch.yc, batch.xt, batch.yt, num_samples=50, seed=None, smooth=False, covariance_est="bayesian", batch_size_targets=4, nu_p=50)
             if reduce_ll:
                 outs.tar_ll = ll.mean()
             else:

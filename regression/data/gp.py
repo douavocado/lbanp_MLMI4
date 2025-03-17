@@ -66,20 +66,26 @@ class GPSampler(object):
             num_tar=None,
             max_num_points=50,
             x_range=(-2, 2),
-            device='cpu'):
+            xt_range=(-2, 2),
+            device='cpu', 
+            return_params=False):
 
         batch = AttrDict()
         num_ctx = num_ctx or torch.randint(low=3, high=max_num_points-3, size=[1]).item()  # Nc
         num_tar = num_tar or torch.randint(low=3, high=max_num_points-num_ctx, size=[1]).item()  # Nt
 
+        # Generate the context points
+        batch.xc = x_range[0] + (x_range[1] - x_range[0]) * torch.rand([batch_size, num_ctx, 1], device=device)
+        batch.xt = xt_range[0] + (xt_range[1] - xt_range[0]) * torch.rand([batch_size, num_tar, 1], device=device)
+        batch.x = torch.cat([batch.xc, batch.xt], dim=1)
         num_points = num_ctx + num_tar  # N = Nc + Nt
-        batch.x = x_range[0] + (x_range[1] - x_range[0]) \
-                * torch.rand([batch_size, num_points, 1], device=device)  # [B,N,Dx=1]
-        batch.xc = batch.x[:,:num_ctx]  # [B,Nc,1]
-        batch.xt = batch.x[:,num_ctx:]  # [B,Nt,1]
+        # batch.x = x_range[0] + (x_range[1] - x_range[0]) \
+        #         * torch.rand([batch_size, num_points, 1], device=device)  # [B,N,Dx=1]
+        # batch.xc = batch.x[:,:num_ctx]  # [B,Nc,1]
+        # batch.xt = batch.x[:,num_ctx:]  # [B,Nt,1]
 
         # batch_size * num_points * num_points
-        cov = self.kernel(batch.x)  # [B,N,N]
+        cov, length, scale = self.kernel(batch.x, return_params=True)  # [B,N,N]
         mean = torch.zeros(batch_size, num_points, device=device)  # [B,N]
         batch.y = MultivariateNormal(mean, cov).rsample().unsqueeze(-1)  # [B,N,Dy=1]
         batch.yc = batch.y[:,:num_ctx]  # [B,Nc,1]
@@ -91,7 +97,10 @@ class GPSampler(object):
             else:
                 t_noise = self.t_noise
             batch.y += t_noise * StudentT(2.1).rsample(batch.y.shape).to(device)
-        return batch
+        if return_params:
+            return batch, length, scale
+        else:
+            return batch
         # {"x": [B,N,1], "xc": [B,Nc,1], "xt": [B,Nt,1],
         #  "y": [B,N,1], "yc": [B,Nt,1], "yt": [B,Nt,1]}
 
@@ -102,11 +111,34 @@ class RBFKernel(object):
         self.max_scale = max_scale
 
     # x: batch_size * num_points * dim  [B,N,Dx=1]
-    def __call__(self, x):
+    def __call__(self, x, return_params=False):
         length = 0.1 + (self.max_length-0.1) \
                 * torch.rand([x.shape[0], 1, 1, 1], device=x.device)
         scale = 0.1 + (self.max_scale-0.1) \
                 * torch.rand([x.shape[0], 1, 1], device=x.device)
+
+        # batch_size * num_points * num_points * dim  [B,N,N,1]
+        dist = (x.unsqueeze(-2) - x.unsqueeze(-3))/length
+
+        # batch_size * num_points * num_points  [B,N,N]
+        cov = scale.pow(2) * torch.exp(-0.5 * dist.pow(2).sum(-1)) \
+                + self.sigma_eps**2 * torch.eye(x.shape[-2]).to(x.device)
+
+        if return_params:
+            return cov, length, scale
+        else:
+            return cov
+
+class RBFKernelNonRandom(object):
+    def __init__(self, sigma_eps=2e-2, length=0.6, scale=1.0):
+        self.sigma_eps = sigma_eps
+        self.length = length
+        self.scale = scale
+
+    # x: batch_size * num_points * dim  [B,N,Dx=1]
+    def __call__(self, x):
+        length = self.length * torch.ones([x.shape[0], 1, 1, 1], device=x.device)
+        scale = self.scale * torch.ones([x.shape[0], 1, 1], device=x.device)
 
         # batch_size * num_points * num_points * dim  [B,N,N,1]
         dist = (x.unsqueeze(-2) - x.unsqueeze(-3))/length

@@ -25,5 +25,6 @@ import os
 ROOT = ''
 
 evalsets_path = os.path.join(ROOT, 'evalsets')
+testsets_path = os.path.join(ROOT, 'testsets')
 datasets_path = os.path.join(ROOT, 'datasets')
 results_path = os.path.join(ROOT, 'results')

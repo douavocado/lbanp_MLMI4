@@ -20,7 +20,7 @@ from tqdm import tqdm
 
 from data.gp import *
 from utils.misc import load_module
-from utils.paths import results_path, evalsets_path
+from utils.paths import results_path, evalsets_path, testsets_path
 from utils.log import get_logger, RunningAverage
 
 def main():
@@ -105,6 +105,8 @@ def main():
         train(args, model)
     elif args.mode == 'eval':
         eval(args, model)
+    elif args.mode == 'test':
+        eval_testset(args, model)
 
 def train(args, model):
     device = torch.device(args.device)
@@ -203,6 +205,14 @@ def get_eval_path(args):
     filename += '.tar'
     return path, filename
 
+def get_test_path(args):
+    path = osp.join(testsets_path, 'gp')
+    filename = f'{args.eval_kernel}-seed{args.eval_seed}'
+    if args.t_noise is not None:
+        filename += f'_{args.t_noise}'
+    filename += '.tar'
+    return path, filename
+
 def gen_evalset(args, device):
     if args.eval_kernel == 'rbf':
         kernel = RBFKernel()
@@ -227,6 +237,35 @@ def gen_evalset(args, device):
         torch.cuda.manual_seed(time.time())
 
     path, filename = get_eval_path(args)
+    if not osp.isdir(path):
+        os.makedirs(path)
+    torch.save(batches, osp.join(path, filename))
+
+def gen_testset(args, device):
+    if args.eval_kernel == 'rbf':
+        kernel = RBFKernel()
+    elif args.eval_kernel == 'matern':
+        kernel = Matern52Kernel()
+    elif args.eval_kernel == 'periodic':
+        kernel = PeriodicKernel()
+    else:
+        raise ValueError(f'Invalid kernel {args.eval_kernel}')
+    print(f"Generating Evaluation Sets with {args.eval_kernel} kernel")
+
+    sampler = GPSampler(kernel, t_noise=args.t_noise, seed=args.eval_seed)
+    batches = []
+    for i in tqdm(range(args.eval_num_batches), ascii=True):
+        batches.append(sampler.sample(
+            batch_size=args.eval_batch_size,
+            max_num_points=args.max_num_points,
+            xt_range=(2, 4),
+            device=device))
+
+    torch.manual_seed(time.time())
+    if args.device == "cuda":   
+        torch.cuda.manual_seed(time.time())
+
+    path, filename = get_test_path(args)
     if not osp.isdir(path):
         os.makedirs(path)
     torch.save(batches, osp.join(path, filename))
@@ -264,6 +303,64 @@ def eval(args, model):
     model.eval()
     with torch.no_grad():
         for batch in tqdm(eval_batches, ascii=True):
+            for key, val in batch.items():
+                batch[key] = val.to(device)
+            if args.model in ["np", "anp", "bnp", "banp"]:
+                outs = model(batch, args.eval_num_samples)
+            else:
+                outs = model(batch, use_ar=args.use_ar)
+
+            for key, val in outs.items():
+                ravg.update(key, val)
+
+    torch.manual_seed(time.time())
+    if args.device == "cuda":   
+        torch.cuda.manual_seed(time.time())
+
+    line = f'{args.model}:{args.expid} {args.eval_kernel} '
+    if args.t_noise is not None:
+        line += f'tn {args.t_noise} '
+    line += ravg.info()
+
+    if logger is not None:
+        logger.info(line)
+
+    return line
+
+
+def eval_testset(args, model):
+    device = torch.device(args.device)
+    # eval a trained model on log-likelihood
+    if args.mode == 'test':
+        ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location=args.device)
+        model.load_state_dict(ckpt.model)
+        if args.eval_logfile is None:
+            eval_logfile = f'test_{args.eval_kernel}'
+            if args.t_noise is not None:
+                eval_logfile += f'_tn_{args.t_noise}'
+            eval_logfile += '.log'
+        else:
+            eval_logfile = args.eval_logfile
+        filename = os.path.join(args.root, eval_logfile)
+        logger = get_logger(filename, mode='w')
+    else:
+        logger = None
+
+    path, filename = get_test_path(args)
+    if not osp.isfile(osp.join(path, filename)):
+        print('generating evaluation sets...')
+        gen_testset(args, device)
+    test_batches = torch.load(osp.join(path, filename))
+
+    if args.mode == "eval":
+        torch.manual_seed(args.eval_seed)
+        if args.device == "cuda":
+            torch.cuda.manual_seed(args.eval_seed)
+
+    ravg = RunningAverage()
+    model.eval()
+    with torch.no_grad():
+        for batch in tqdm(test_batches, ascii=True):
             for key, val in batch.items():
                 batch[key] = val.to(device)
             if args.model in ["np", "anp", "bnp", "banp"]:
