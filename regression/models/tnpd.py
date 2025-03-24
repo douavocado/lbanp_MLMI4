@@ -40,7 +40,8 @@ class TNPD(TNP):
         nhead,
         dropout,
         num_layers,
-        bound_std=False
+        bound_std=False,
+        device='cpu',
     ):
         super(TNPD, self).__init__(
             dim_x,
@@ -51,7 +52,8 @@ class TNPD(TNP):
             nhead,
             dropout,
             num_layers,
-            bound_std
+            bound_std,
+            device
         )
         
         self.predictor = nn.Sequential(
@@ -85,7 +87,7 @@ class TNPD(TNP):
         batch.xc = xc
         batch.yc = yc
         batch.xt = xt
-        batch.yt = torch.zeros((xt.shape[0], xt.shape[1], yc.shape[2]), device='cuda')
+        batch.yt = torch.zeros((xt.shape[0], xt.shape[1], yc.shape[2]), device=self.device)
 
         z_target = self.encode(batch, autoreg=False)
         out = self.predictor(z_target)

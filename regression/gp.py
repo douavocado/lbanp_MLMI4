@@ -12,13 +12,18 @@
 import os
 import os.path as osp
 import argparse
+import random
 import yaml
 import torch
 import time
 from attrdict import AttrDict
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import numpy as np
 
 from data.gp import *
+from data.sawtooth import SawtoothSampler
+from data.mixture import MixtureSampler
 from utils.misc import load_module
 from utils.paths import results_path, evalsets_path, testsets_path
 from utils.log import get_logger, RunningAverage
@@ -31,6 +36,7 @@ def main():
     parser.add_argument('--mode', default='train')
     parser.add_argument('--expid', type=str, default='default')
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--resume_from', type=str, default=None)
 
     # Data
     parser.add_argument('--max_num_points', type=int, default=50)
@@ -50,6 +56,7 @@ def main():
     parser.add_argument('--print_freq', type=int, default=200)
     parser.add_argument('--eval_freq', type=int, default=5000)
     parser.add_argument('--save_freq', type=int, default=1000)
+    parser.add_argument('--task', type=str, default='gp')
 
     # Eval
     parser.add_argument('--eval_seed', type=int, default=0)
@@ -108,6 +115,80 @@ def main():
     elif args.mode == 'test':
         eval_testset(args, model)
 
+def visualize_prediction(model, sampler, args, step, device):
+    """
+    Visualize model predictions on a random sample from the sampler.
+    
+    Args:
+        model: The trained model
+        sampler: Data sampler
+        args: Command line arguments
+        step: Current training step
+        device: Computation device
+    """
+    model.eval()
+    with torch.no_grad():
+        # Generate a single batch sample for visualization
+        batch = sampler.sample(batch_size=1, max_num_points=args.max_num_points, device=device)
+        
+        # Get model predictions
+        # if args.model in ["np", "anp", "cnp", "canp", "bnp", "banp"]:
+        #     outs = model(batch, num_samples=50)  # Use more samples for better uncertainty estimation
+        # else:
+        outs = model.predict(batch.xc, batch.yc, batch.xt)
+        
+        # Extract data for plotting
+        x_context = batch['xc'][0,:,0].cpu().numpy()
+        y_context = batch['yc'][0,:,0].cpu().numpy()
+        x_target = batch['xt'][0,:,0].cpu().numpy()
+        y_target = batch['yt'][0,:,0].cpu().numpy()
+        
+        # Get predictions
+        mean = outs.loc[0, :,0].cpu().numpy()
+        std = outs.scale[0, :,0].cpu().numpy()
+        
+        # Create plot
+        plt.figure(figsize=(10, 6))
+        
+        # Plot context points
+        plt.scatter(x_context, y_context, color='blue', marker='o', s=50, label='Context')
+        
+        # Plot target points
+        plt.scatter(x_target, y_target, color='green', marker='x', s=30, label='Target (True)')
+        
+        # Sort x_target for smooth curve plotting
+        sort_idx = np.argsort(x_target)
+        x_target_sorted = x_target[sort_idx]
+        mean_sorted = mean[sort_idx]
+        std_sorted = std[sort_idx]
+        
+        # Plot mean prediction
+        plt.plot(x_target_sorted, mean_sorted, color='red', label='Prediction Mean')
+        
+        # Plot confidence intervals (2 standard deviations)
+        plt.fill_between(
+            x_target_sorted, 
+            mean_sorted - 2 * std_sorted, 
+            mean_sorted + 2 * std_sorted, 
+            color='red', alpha=0.2, label='95% Confidence'
+        )
+        
+        plt.title(f'Model Predictions at Step {step}')
+        plt.xlabel('x')
+        plt.ylabel('y')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Create directory for plots if it doesn't exist
+        plots_dir = os.path.join(args.root, 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+        
+        # Save plot
+        plt.savefig(os.path.join(plots_dir, f'prediction_step_{step}.png'), dpi=150)
+        plt.close()
+    
+    model.train()
+
 def train(args, model):
     device = torch.device(args.device)
     if osp.exists(args.root + '/ckpt.tar'):
@@ -128,7 +209,15 @@ def train(args, model):
     if args.device == "cuda":
         torch.cuda.manual_seed(args.train_seed)
 
-    sampler = GPSampler(RBFKernel())
+    if args.task == 'gp':
+        sampler = GPSampler(RBFKernel())
+    elif args.task == 'sawtooth':
+        sampler = SawtoothSampler()
+    elif args.task == 'mixture':
+        sampler = MixtureSampler()
+    else:
+        raise ValueError(f'Invalid task {args.task}')
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=args.num_steps)
@@ -140,6 +229,13 @@ def train(args, model):
         scheduler.load_state_dict(ckpt.scheduler)
         logfilename = ckpt.logfilename
         start_step = ckpt.step
+    elif args.resume_from:
+        ckpt = torch.load(args.resume_from)
+        model.load_state_dict(ckpt.model)
+        # optimizer.load_state_dict(ckpt.optimizer)
+        # scheduler.load_state_dict(ckpt.scheduler)
+        logfilename = os.path.join(args.root, f'train_{time.strftime("%Y%m%d-%H%M")}.log')
+        start_step = 1
     else:
         logfilename = os.path.join(args.root,
                 f'train_{time.strftime("%Y%m%d-%H%M")}.log')
@@ -155,10 +251,34 @@ def train(args, model):
     for step in range(start_step, args.num_steps+1):
         model.train()
         optimizer.zero_grad()
-        batch = sampler.sample(
-            batch_size=args.train_batch_size,
-            max_num_points=args.max_num_points,
-            device=device)
+        # frequency range for sawtooth gradually increases from initial 0.5 to 2 to 2 to 4 by the end of training
+        # same for number of context points. Starts high at random int between 30 and 100
+        # and decreases to between 0 and 30 by the end of training
+        # number of target points starts at 30 at start of training and increases to 100 by the end of training
+        if args.task == 'sawtooth':
+            # freq_range_high = step / args.num_steps * (4 - 2) + 2
+            # freq_range_low = step / args.num_steps * (2 - 0.5) + 0.5
+            freq_range_high = 4
+            freq_range_low = 2
+            # num_ctx_high = int(100-step / args.num_steps * (100 - 30))
+            # num_ctx_low = int(30-step / args.num_steps * (30 - 0))
+            # num_tar = int(30+step / args.num_steps * (100 - 30))
+            num_ctx_high = 30
+            num_ctx_low = 0
+            num_tar = 100
+
+            batch = sampler.sample(
+                batch_size=args.train_batch_size,
+                max_num_points=args.max_num_points,
+                freq_range=(freq_range_low, freq_range_high),
+                num_ctx=random.randint(num_ctx_low, num_ctx_high),
+                num_tar=num_tar,
+                device=device)
+        else:
+            batch = sampler.sample(
+                batch_size=args.train_batch_size,
+                max_num_points=args.max_num_points,
+                device=device)
         
         if args.model in ["np", "anp", "cnp", "canp", "bnp", "banp"]:
             outs = model(batch, num_samples=args.train_num_samples)
@@ -177,7 +297,10 @@ def train(args, model):
             line = f'{args.model}:{args.expid} step {step} '
             line += f'lr {optimizer.param_groups[0]["lr"]:.3e} '
             line += f"[train_loss] "
-            line += ravg.info()
+            line += ravg.info() + "\n"
+            if args.task == 'sawtooth':
+                line += f"num_ctx_high: {num_ctx_high}, num_ctx_low: {num_ctx_low}, num_tar: {num_tar}\n"
+                line += f"freq_range_high: {freq_range_high}, freq_range_low: {freq_range_low}\n"
             logger.info(line)
 
             if step % args.eval_freq == 0:
@@ -185,6 +308,10 @@ def train(args, model):
                 logger.info(line + '\n')
 
             ravg.reset()
+        
+        # Plot predictions visualization every 1000 steps
+        if step % 1000 == 0:
+            visualize_prediction(model, sampler, args, step, device)
 
         if step % args.save_freq == 0 or step == args.num_steps:
             ckpt = AttrDict()
@@ -198,7 +325,7 @@ def train(args, model):
     eval(args, model)
 
 def get_eval_path(args):
-    path = osp.join(evalsets_path, 'gp')
+    path = osp.join(evalsets_path, args.task)
     filename = f'{args.eval_kernel}-seed{args.eval_seed}'
     if args.t_noise is not None:
         filename += f'_{args.t_noise}'
@@ -206,7 +333,7 @@ def get_eval_path(args):
     return path, filename
 
 def get_test_path(args):
-    path = osp.join(testsets_path, 'gp')
+    path = osp.join(testsets_path, args.task)
     filename = f'{args.eval_kernel}-seed{args.eval_seed}'
     if args.t_noise is not None:
         filename += f'_{args.t_noise}'
@@ -214,17 +341,27 @@ def get_test_path(args):
     return path, filename
 
 def gen_evalset(args, device):
-    if args.eval_kernel == 'rbf':
-        kernel = RBFKernel()
-    elif args.eval_kernel == 'matern':
-        kernel = Matern52Kernel()
-    elif args.eval_kernel == 'periodic':
-        kernel = PeriodicKernel()
-    else:
-        raise ValueError(f'Invalid kernel {args.eval_kernel}')
-    print(f"Generating Evaluation Sets with {args.eval_kernel} kernel")
+    if args.task == 'gp':
+        if args.eval_kernel == 'rbf':
+            kernel = RBFKernel()
+        elif args.eval_kernel == 'matern':
+            kernel = Matern52Kernel()
+        elif args.eval_kernel == 'periodic':
+            kernel = PeriodicKernel()
+        else:
+            raise ValueError(f'Invalid kernel {args.eval_kernel}')
+        print(f"Generating Evaluation Sets with {args.eval_kernel} kernel")
 
-    sampler = GPSampler(kernel, t_noise=args.t_noise, seed=args.eval_seed)
+        sampler = GPSampler(kernel, t_noise=args.t_noise, seed=args.eval_seed)
+    elif args.task == 'sawtooth':
+        sampler = SawtoothSampler()
+        print(f"Generating Evaluation Sets with Sawtooth sampler")
+    elif args.task == 'mixture':
+        sampler = MixtureSampler()
+        print(f"Generating Evaluation Sets with Mixture sampler")
+    else:
+        raise ValueError(f'Invalid task {args.task}')
+    
     batches = []
     for i in tqdm(range(args.eval_num_batches), ascii=True):
         batches.append(sampler.sample(
@@ -242,23 +379,33 @@ def gen_evalset(args, device):
     torch.save(batches, osp.join(path, filename))
 
 def gen_testset(args, device):
-    if args.eval_kernel == 'rbf':
-        kernel = RBFKernel()
-    elif args.eval_kernel == 'matern':
-        kernel = Matern52Kernel()
-    elif args.eval_kernel == 'periodic':
-        kernel = PeriodicKernel()
-    else:
-        raise ValueError(f'Invalid kernel {args.eval_kernel}')
-    print(f"Generating Evaluation Sets with {args.eval_kernel} kernel")
+    if args.task == 'gp':
+        if args.eval_kernel == 'rbf':
+            kernel = RBFKernel()
+        elif args.eval_kernel == 'matern':
+            kernel = Matern52Kernel()
+        elif args.eval_kernel == 'periodic':
+            kernel = PeriodicKernel()
+        else:
+            raise ValueError(f'Invalid kernel {args.eval_kernel}')
+        print(f"Generating Evaluation Sets with {args.eval_kernel} kernel")
 
-    sampler = GPSampler(kernel, t_noise=args.t_noise, seed=args.eval_seed)
+        sampler = GPSampler(kernel, t_noise=args.t_noise, seed=args.eval_seed)
+    elif args.task == 'sawtooth':
+        sampler = SawtoothSampler()
+        print(f"Generating Evaluation Sets with Sawtooth sampler")
+    elif args.task == 'mixture':
+        sampler = MixtureSampler()
+        print(f"Generating Evaluation Sets with Mixture sampler")
+    else:
+        raise ValueError(f'Invalid task {args.task}')
+
     batches = []
     for i in tqdm(range(args.eval_num_batches), ascii=True):
         batches.append(sampler.sample(
             batch_size=args.eval_batch_size,
             max_num_points=args.max_num_points,
-            xt_range=(2, 4),
+            xt_range=(2, 6),
             device=device))
 
     torch.manual_seed(time.time())
@@ -308,7 +455,10 @@ def eval(args, model):
             if args.model in ["np", "anp", "bnp", "banp"]:
                 outs = model(batch, args.eval_num_samples)
             else:
-                outs = model(batch, use_ar=args.use_ar)
+                if args.use_ar:
+                    outs = model(batch, use_ar=args.use_ar)
+                else:
+                    outs = model(batch)
 
             for key, val in outs.items():
                 ravg.update(key, val)

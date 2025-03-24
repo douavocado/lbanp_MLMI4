@@ -85,7 +85,10 @@ class GPSampler(object):
         # batch.xt = batch.x[:,num_ctx:]  # [B,Nt,1]
 
         # batch_size * num_points * num_points
-        cov, length, scale = self.kernel(batch.x, return_params=True)  # [B,N,N]
+        if return_params:
+            cov, length, scale = self.kernel(batch.x, return_params=return_params)  # [B,N,N]
+        else:
+            cov = self.kernel(batch.x)  # [B,N,N]
         mean = torch.zeros(batch_size, num_points, device=device)  # [B,N]
         batch.y = MultivariateNormal(mean, cov).rsample().unsqueeze(-1)  # [B,N,Dy=1]
         batch.yc = batch.y[:,:num_ctx]  # [B,Nc,1]
@@ -156,7 +159,7 @@ class Matern52Kernel(object):
         self.max_scale = max_scale
 
     # x: batch_size * num_points * dim
-    def __call__(self, x):
+    def __call__(self, x, return_params=False):
         length = 0.1 + (self.max_length-0.1) \
                 * torch.rand([x.shape[0], 1, 1, 1], device=x.device)
         scale = 0.1 + (self.max_scale-0.1) \
@@ -179,7 +182,7 @@ class PeriodicKernel(object):
         self.max_scale = max_scale
 
     # x: batch_size * num_points * dim
-    def __call__(self, x):
+    def __call__(self, x, return_params=False):
         p = 0.1 + 0.4*torch.rand([x.shape[0], 1, 1], device=x.device)
         length = 0.1 + (self.max_length-0.1) \
                 * torch.rand([x.shape[0], 1, 1], device=x.device)
@@ -192,3 +195,40 @@ class PeriodicKernel(object):
                 + self.sigma_eps**2 * torch.eye(x.shape[-2]).to(x.device)
 
         return cov
+
+class WeaklyPeriodicKernel(object):
+    def __init__(self, sigma_eps=2e-2, max_length_periodic=0.6, max_length_rbf=1.2, max_scale=1.0):
+        self.sigma_eps = sigma_eps
+        self.max_length_periodic = max_length_periodic
+        self.max_length_rbf = max_length_rbf
+        self.max_scale = max_scale
+
+    # x: batch_size * num_points * dim
+    def __call__(self, x, return_params=False):
+        # Sample parameters
+        p = 0.1 + 0.4*torch.rand([x.shape[0], 1, 1], device=x.device)
+        length_periodic = 0.1 + (self.max_length_periodic-0.1) \
+                * torch.rand([x.shape[0], 1, 1], device=x.device)
+        length_rbf = 0.1 + (self.max_length_rbf-0.1) \
+                * torch.rand([x.shape[0], 1, 1, 1], device=x.device)
+        scale = 0.1 + (self.max_scale-0.1) \
+                * torch.rand([x.shape[0], 1, 1], device=x.device)
+
+        # Compute distances for both kernels
+        dist_periodic = x.unsqueeze(-2) - x.unsqueeze(-3)
+        dist_rbf = (x.unsqueeze(-2) - x.unsqueeze(-3))/length_rbf
+
+        # Periodic component
+        periodic_term = torch.exp(- 2*(torch.sin(math.pi*dist_periodic.abs().sum(-1)/p)/length_periodic).pow(2))
+        
+        # RBF component
+        rbf_term = torch.exp(-0.5 * dist_rbf.pow(2).sum(-1))
+        
+        # Combine both kernels by multiplication
+        cov = scale.pow(2) * periodic_term * rbf_term \
+                + self.sigma_eps**2 * torch.eye(x.shape[-2]).to(x.device)
+
+        if return_params:
+            return cov, p, length_periodic, length_rbf, scale
+        else:
+            return cov

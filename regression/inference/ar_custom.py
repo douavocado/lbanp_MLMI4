@@ -402,5 +402,3 @@ def ar_log_likelihood(model, xc, yc, xt, yt, seed=None):
     
     log_likelihood = torch.mean(log_likelihoods, dim=-1)
     return log_likelihood
-    
-        
