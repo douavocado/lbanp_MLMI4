@@ -99,9 +99,13 @@ class GPSampler(object):
                 t_noise = 0.15 * torch.rand(batch.y.shape).to(device)  # [B,N,1]
             else:
                 t_noise = self.t_noise
+            batch.t_noise = t_noise.clone()
             batch.y += t_noise * StudentT(2.1).rsample(batch.y.shape).to(device)
         if return_params:
-            return batch, length, scale
+            batch.length = length.detach().clone()
+            batch.scale = scale.detach().clone()
+            batch.cov = cov.detach().clone()
+            return batch
         else:
             return batch
         # {"x": [B,N,1], "xc": [B,Nc,1], "xt": [B,Nt,1],

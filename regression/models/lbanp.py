@@ -21,7 +21,7 @@ from attrdict import AttrDict
 from torch.distributions.normal import Normal
 
 from models.lbanp_modules import LBANPEncoderLayer, LBANPEncoder, NPDecoderLayer, NPDecoder
-from inference.ar_custom import ar_log_likelihood, no_cheat_ar_log_likelihood
+from inference.ar_custom import *
 
 class LBANP(nn.Module):
     """
@@ -114,11 +114,15 @@ class LBANP(nn.Module):
         return Normal(mean, std)
 
 
-    def forward(self, batch, num_samples=None, reduce_ll=True, use_ar=False):
+    def forward(self, batch, num_samples=None, reduce_ll=True, use_ar=False, track_diff=False):
         outs = AttrDict()
         if use_ar:
             # ll = no_cheat_ar_log_likelihood(self, batch.xc, batch.yc, batch.xt, batch.yt, num_samples=50, seed=None, smooth=False, covariance_est="bayesian", batch_size_targets=4, nu_p=50)
-            ll = ar_log_likelihood(self, batch.xc, batch.yc, batch.xt, batch.yt)
+            if track_diff:
+                ll, out_dic = ar_log_likelihood(self, batch.xc, batch.yc, batch.xt, batch.yt, get_normal=True, track_diff=True)
+            else:
+                ll = ar_log_likelihood(self, batch.xc, batch.yc, batch.xt, batch.yt,get_normal=False)
+
             if reduce_ll:
                 outs.tar_ll = ll.mean()
             else:
@@ -132,5 +136,6 @@ class LBANP(nn.Module):
             else:
                 outs.tar_ll = pred_tar.log_prob(batch.yt).sum(-1)
             outs.loss = - (outs.tar_ll)
-
+        if track_diff and use_ar:
+            return outs, out_dic    
         return outs

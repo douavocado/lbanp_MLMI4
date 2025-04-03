@@ -14,12 +14,15 @@ import os.path as osp
 import argparse
 import random
 import yaml
+
 import torch
 import time
 from attrdict import AttrDict
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
+
+from models.ground_truth import GaussianProcess
 
 from data.gp import *
 from data.sawtooth import SawtoothSampler
@@ -83,6 +86,9 @@ def main():
 
     # AR settings
     parser.add_argument('--use_ar', action='store_true')
+    parser.add_argument('--small_only', action='store_true')
+    parser.add_argument('--track_diff', action='store_true')
+    parser.add_argument('--ground_truth', action='store_true')
 
     args = parser.parse_args()
 
@@ -329,6 +335,8 @@ def get_eval_path(args):
     filename = f'{args.eval_kernel}-seed{args.eval_seed}'
     if args.t_noise is not None:
         filename += f'_{args.t_noise}'
+    if args.ground_truth:
+        filename += '_gt'
     filename += '.tar'
     return path, filename
 
@@ -364,16 +372,23 @@ def gen_evalset(args, device):
     
     batches = []
     for i in tqdm(range(args.eval_num_batches), ascii=True):
-        batches.append(sampler.sample(
-            batch_size=args.eval_batch_size,
-            max_num_points=args.max_num_points,
-            device=device))
+        if args.ground_truth:
+            batches.append(sampler.sample(
+                batch_size=args.eval_batch_size,
+                max_num_points=args.max_num_points,
+                device=device, return_params=True))
+        else:
+            batches.append(sampler.sample(
+                batch_size=args.eval_batch_size,
+                max_num_points=args.max_num_points,
+                device=device))
 
     torch.manual_seed(time.time())
     if args.device == "cuda":   
         torch.cuda.manual_seed(time.time())
 
     path, filename = get_eval_path(args)
+    
     if not osp.isdir(path):
         os.makedirs(path)
     torch.save(batches, osp.join(path, filename))
@@ -439,6 +454,8 @@ def eval(args, model):
     if not osp.isfile(osp.join(path, filename)):
         print('generating evaluation sets...')
         gen_evalset(args, device)
+    
+    print(f"Loading evaluation batches from {path}/{filename}")
     eval_batches = torch.load(osp.join(path, filename))
 
     if args.mode == "eval":
@@ -448,15 +465,35 @@ def eval(args, model):
 
     ravg = RunningAverage()
     model.eval()
+    diff_tracker = {}
+    diff_tracker_count = {}
     with torch.no_grad():
         for batch in tqdm(eval_batches, ascii=True):
+            if args.small_only:
+                if batch.xt.shape[1] >= 6:
+                    continue # only give small samples
             for key, val in batch.items():
                 batch[key] = val.to(device)
-            if args.model in ["np", "anp", "bnp", "banp"]:
+            if args.ground_truth:
+                ground_truth_model = GaussianProcess(dim_x=1, dim_y=1)
+                outs = ground_truth_model(batch)
+            elif args.model in ["np", "anp", "bnp", "banp"]:
                 outs = model(batch, args.eval_num_samples)
             else:
                 if args.use_ar:
-                    outs = model(batch, use_ar=args.use_ar)
+                    if args.track_diff:
+                        outs, out_dic = model(batch, use_ar=args.use_ar, track_diff=True)
+                        if out_dic["context_size"] not in diff_tracker:
+                            diff_tracker[out_dic["context_size"]] = out_dic["diff"]
+                        else:
+                            diff_tracker[out_dic["context_size"]] += out_dic["diff"]
+                        if out_dic["context_size"] not in diff_tracker_count:
+                            diff_tracker_count[out_dic["context_size"]] = batch["xc"].shape[1]
+                        else:
+                            diff_tracker_count[out_dic["context_size"]] += batch["xc"].shape[1]
+                    else:
+                        outs = model(batch, use_ar=args.use_ar, track_diff=False)
+
                 else:
                     outs = model(batch)
 
@@ -474,7 +511,106 @@ def eval(args, model):
 
     if logger is not None:
         logger.info(line)
+    import matplotlib.pyplot as plt
+    import numpy as np
 
+    # Calculate average differences
+    average_diff = {cat: diff_tracker[cat] / diff_tracker_count[cat] for cat in diff_tracker}
+    
+    # Sort the data by context size
+    context_sizes = sorted(average_diff.keys())
+    diffs = [average_diff[size] for size in context_sizes]
+    counts = [diff_tracker_count[size] for size in context_sizes]
+    
+    # Create figure and axis
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    
+    # Plot average differences
+    ax1.plot(context_sizes, diffs, 'b-', marker='o', linewidth=2, label='Average Difference')
+    ax1.set_xlabel('Context Size')
+    ax1.set_ylabel('Average Difference', color='b')
+    ax1.tick_params(axis='y', labelcolor='b')
+    
+    # Create second y-axis for counts
+    ax2 = ax1.twinx()
+    
+    # Plot counts as area plot
+    ax2.plot(context_sizes, counts, 'r-', alpha=0.5, linewidth=1)
+    ax2.fill_between(context_sizes, counts, alpha=0.2, color='r', label='Sample Count')
+    ax2.set_ylabel('Sample Count', color='r')
+    ax2.tick_params(axis='y', labelcolor='r')
+    
+    # Add title and legend
+    plt.title('Average Difference vs Context Size')
+    fig.tight_layout()
+    
+    # Add legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
+    
+    # Save the plot
+    plt.savefig('context_size_diff_plot.png', dpi=300, bbox_inches='tight')
+    # Create a text file with LaTeX table code
+    with open('context_size_table.tex', 'w') as f:
+        # Write LaTeX table header
+        f.write("\\begin{table}[htbp]\n")
+        f.write("\\centering\n")
+        f.write("\\begin{tabular}{lcc}\n")
+        f.write("\\toprule\n")
+        f.write("Context Size & Average Difference & Sample Count \\\\\n")
+        f.write("\\midrule\n")
+        
+        # Group context sizes in intervals of five
+        intervals = {}
+        for size in context_sizes:
+            interval_key = f"{(size-1)//5*5+1}-{(size-1)//5*5+5}"
+            if interval_key not in intervals:
+                intervals[interval_key] = {"diff_sum": 0, "count_sum": 0, "num_sizes": 0}
+            
+            intervals[interval_key]["diff_sum"] += average_diff[size]
+            intervals[interval_key]["count_sum"] += diff_tracker_count[size]
+            intervals[interval_key]["num_sizes"] += 1
+        
+        # Write each interval to the table
+        for interval, data in sorted(intervals.items(), key=lambda x: int(x[0].split('-')[0])):
+            avg_diff = data["diff_sum"] / data["num_sizes"]
+            avg_count = data["count_sum"] / data["num_sizes"]
+            f.write(f"{interval} & {avg_diff:.4f} & {int(avg_count)} \\\\\n")
+        
+        # Write LaTeX table footer
+        f.write("\\bottomrule\n")
+        f.write("\\end{tabular}\n")
+        f.write("\\caption{Average difference between autoregressive and marginal log-likelihood by context size intervals}\n")
+        f.write("\\label{tab:context_size_diff}\n")
+        f.write("\\end{table}\n")
+    
+    # Also create a more detailed plot showing the grouped data
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Prepare grouped data for plotting
+    interval_labels = []
+    interval_diffs = []
+    
+    for interval, data in sorted(intervals.items(), key=lambda x: int(x[0].split('-')[0])):
+        interval_labels.append(interval)
+        interval_diffs.append(data["diff_sum"] / data["num_sizes"])
+    
+    # Plot the grouped data
+    ax.bar(interval_labels, interval_diffs, color='skyblue', edgecolor='navy')
+    ax.set_xlabel('Context Size Intervals')
+    ax.set_ylabel('Average Difference')
+    ax.set_title('Average Difference by Context Size Intervals')
+    
+    # Add values on top of bars
+    for i, v in enumerate(interval_diffs):
+        ax.text(i, v + 0.01, f"{v:.3f}", ha='center')
+    
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig('context_size_intervals_plot.png', dpi=300, bbox_inches='tight')
+    print(average_diff)
+    print(diff_tracker_count)
     return line
 
 
@@ -513,7 +649,10 @@ def eval_testset(args, model):
         for batch in tqdm(test_batches, ascii=True):
             for key, val in batch.items():
                 batch[key] = val.to(device)
-            if args.model in ["np", "anp", "bnp", "banp"]:
+            if args.ground_truth:
+                ground_truth_model = GaussianProcess(dim_x=1, dim_y=1)
+                outs = ground_truth_model(batch)
+            elif args.model in ["np", "anp", "bnp", "banp"]:
                 outs = model(batch, args.eval_num_samples)
             else:
                 outs = model(batch, use_ar=args.use_ar)
